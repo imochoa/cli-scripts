@@ -1,12 +1,14 @@
 package main
 
-// https://eager.io/blog/go-and-json/
-
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
+	"strconv"
+	"time"
 )
 
 type windowProperties struct {
@@ -19,14 +21,14 @@ type windowProperties struct {
 
 type windowPosition struct {
 	X      int `json:"x"`
-	Y      int `json:"x"`
+	Y      int `json:"y"`
 	Width  int `json:"width"`
 	Height int `json:"height"`
 }
 
 type containerNode struct {
-	Id                 float64          `json:"id"`
-	Type               string           `json:"type"`
+	Id                 int              `json:"id"`
+	Type               string           `json:"type"` // "con" "workspace"
 	Name               string           `json:"name"`
 	Nodes              []containerNode  `json:"nodes"`
 	WindowProperties   windowProperties `json:"window_properties"`
@@ -58,7 +60,7 @@ type containerNode struct {
 }
 
 func saveI3Tree(rootContainer *containerNode) {
-	//  1) run i3-msg -t get_tree
+	// run "i3-msg -t get_tree" and save the results in `rootContainer`
 	out, err := exec.Command("/usr/bin/i3-msg", "-t", "get_tree").Output()
 	if err != nil {
 		log.Fatal(err)
@@ -70,14 +72,30 @@ func saveI3Tree(rootContainer *containerNode) {
 
 }
 
-type nodeFilter func(*containerNode) bool
+func moveContainerToWorkspace(containerId int, workspace int) error {
+	// run "i3-msg -t get_tree" and save the results in `rootContainer`
 
-func noFilter(c *containerNode) bool {
-	return true
+	out, err := exec.Command(
+		"/usr/bin/i3-msg",
+		fmt.Sprintf("[con_id=\"%d\"]", containerId),
+		"move",
+		"workspace",
+		strconv.Itoa(workspace),
+	).Output()
+
+	stdout := string(out)
+	fmt.Println(stdout)
+	return err
 }
 
+type nodeFilter func(*containerNode) bool
+
+// func noFilter(c *containerNode) bool {
+// 	return true
+// }
+
 func recursiveI3ContainerSearch(c containerNode, filter nodeFilter, childConts *[]containerNode) {
-	// Better names!
+	// Look at each
 
 	if filter(&c) {
 		*childConts = append(*childConts, c)
@@ -89,40 +107,57 @@ func recursiveI3ContainerSearch(c containerNode, filter nodeFilter, childConts *
 }
 
 func main() {
+	// Move the first matching container to workspace `workspace`
+	appClass := flag.String("class", "", "Application's WM_CLASS")
+	workspaceNumber := flag.Int("workspace", 1, "Workspace to move the application to")
+	flag.Parse()
 
-	// Get i3 tree
-	var rootContainer containerNode
-	saveI3Tree(&rootContainer)
-
-	// find matches
-
-	// //  1) run i3-msg -t get_tree
-	// out, err := exec.Command("/usr/bin/i3-msg", "-t", "get_tree").Output()
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-	// // fmt.Printf("The data is %s\n", out)
-
-	// var rootContainer containerNode
-
-	// //  2) parse JSON output looking for a class
-
-	// err = json.Unmarshal(out, &rootContainer)
-
-	//  3) return ID so that we can run `i3-msg move '[con_id="xxx"] workspace 4'`
-	var lenGuess int = 20
-	childConts := make([]containerNode, 0, lenGuess)
-	// var childConts []containerNode
-
-	// func filterLeafContainers(c *containerNode) bool {
-	// 	return len(c.Nodes) == 0 && c.Type == "con"
-	// }
-
-	filterContClass := func(c *containerNode) bool {
-		return len(c.Nodes) == 0 && c.Type == "con" && c.WindowProperties.Class == "Gnome-terminal"
+	if *appClass == "" {
+		flag.PrintDefaults()
+		os.Exit(1)
 	}
 
-	recursiveI3ContainerSearch(rootContainer, filterContClass, &childConts)
+	fmt.Printf("Attempting to move WM_CLASS %s to workspace %d ...\n", *appClass, *workspaceNumber)
 
-	fmt.Println(childConts)
+	// var wIdx string = strconv.Itoa(*workspaceNumber)
+
+	filterContClass := func(c *containerNode) bool {
+		return (len(c.Nodes) == 0 &&
+			c.Type == "con" &&
+			c.WindowProperties.Class == *appClass)
+	}
+
+	var rootContainer containerNode
+	//  3) return ID so that we can run
+	var lenGuess int = 20
+	childConts := make([]containerNode, 0, lenGuess)
+
+	var maxStartupSeconds float64 = 2.0
+	pollInterval := 100 * time.Millisecond
+	start := time.Now()
+	for time.Since(start).Seconds() < maxStartupSeconds {
+
+		// Get i3 tree
+		saveI3Tree(&rootContainer)
+
+		childConts = childConts[:0]
+		recursiveI3ContainerSearch(rootContainer, filterContClass, &childConts)
+
+		if len(childConts) > 0 {
+
+			err := moveContainerToWorkspace(childConts[0].Id, *workspaceNumber)
+			if err != nil {
+				log.Fatal(err)
+			}
+			os.Exit(0)
+		}
+
+		fmt.Print('.')
+		time.Sleep(pollInterval)
+		// fmt.Println(time.Now())
+	}
+
+	fmt.Printf("Did not find a WM_CLASS %s container...\n", *appClass)
+	os.Exit(1)
+
 }
